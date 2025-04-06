@@ -25,6 +25,10 @@ export class VirtualBackgroundStream {
   private canvasCtx: CanvasRenderingContext2D
   private tempCanvas: HTMLCanvasElement
   private tempCtx: CanvasRenderingContext2D
+  private tempCanvas2: HTMLCanvasElement
+  private tempCtx2: CanvasRenderingContext2D
+  private tempCanvas3: HTMLCanvasElement
+  private tempCtx3: CanvasRenderingContext2D
 
   constructor(deviceId: string) {
     this.deviceId = deviceId
@@ -51,6 +55,16 @@ export class VirtualBackgroundStream {
     this.tempCanvas.width = this.videoWidth
     this.tempCanvas.height = this.videoHeight
     this.tempCtx = this.tempCanvas.getContext('2d')!
+
+    this.tempCanvas2 = document.createElement('canvas')
+    this.tempCanvas2.width = this.videoWidth
+    this.tempCanvas2.height = this.videoHeight
+    this.tempCtx2 = this.tempCanvas2.getContext('2d')!
+
+    this.tempCanvas3 = document.createElement('canvas')
+    this.tempCanvas3.width = this.videoWidth
+    this.tempCanvas3.height = this.videoHeight
+    this.tempCtx3 = this.tempCanvas3.getContext('2d')!
   }
 
   private async createImageSegmenter() {
@@ -71,6 +85,7 @@ export class VirtualBackgroundStream {
   private callbackForVideo = (segmentationResult: ImageSegmenterResult) => {
     if (!segmentationResult || !segmentationResult.categoryMask) return
     const imageData = this.tempCtx.getImageData(0, 0, this.video.videoWidth, this.video.videoHeight).data
+    const imageData2 = this.tempCtx2.getImageData(0, 0, this.video.videoWidth, this.video.videoHeight).data
     // get results of segmentation
     // 0 - background
     // 1 - hair
@@ -78,33 +93,71 @@ export class VirtualBackgroundStream {
     // 3 - face-skin
     // 4 - clothes
     // 5 - others (accessories)
-    const maskData = segmentationResult.categoryMask.getAsFloat32Array()
+    const maskData = segmentationResult.categoryMask.getAsFloat32Array().map(val => Math.round(val * 255.0))
+    const categoryChosen = 0
 
-    for (let i = 0; i < maskData.length; ++i) {
-      const maskVal = maskData[i]
-      const j = i * 4
-      // set chosen pixels to transparent
-      if (maskVal == 0) {
-        imageData[j + 3] = 0 // alpha channel
+    // draw the top layer on tempCanvas
+    {
+      for (let i = 0; i < maskData.length; ++i) {
+        const maskVal = maskData[i]
+        const j = i * 4
+        // set chosen pixels to transparent
+        if (maskVal == categoryChosen) {
+          imageData[j + 3] = 0 // alpha channel
+        }
+      }
+
+      const uint8Array = new Uint8ClampedArray(imageData.buffer)
+      const dataNew = new ImageData(
+        uint8Array,
+        this.video.videoWidth,
+        this.video.videoHeight
+      )
+
+      this.tempCtx.putImageData(dataNew, 0, 0)
+    }
+
+    // draw the middle layer on tempCanvas3
+    {
+      for (let i = 0; i < maskData.length; ++i) {
+        const maskVal = maskData[i]
+        const maskValL = (i % this.videoWidth) > ((i - 4) % this.videoWidth) ? maskData.slice(i - 4, i) : maskData.slice(i, i)
+        const maskValR = (i % this.videoWidth) < ((i + 4) % this.videoWidth) ? maskData.slice(i + 1, i + 1 + 4) : maskData.slice(i + 1, i + 1)
+        const j = i * 4
+        // set chosen pixels to transparent
+        if (maskVal == categoryChosen) {
+          if (maskValL.some(val => val != categoryChosen) || maskValR.some(val => val != categoryChosen)) {
+            imageData2[j + 3] = 255 // alpha channel
+          } else {
+            imageData2[j + 3] = 0 // alpha channel
+          }
+        }
+      }
+
+      const uint8Array2 = new Uint8ClampedArray(imageData2.buffer)
+      const dataNew2 = new ImageData(
+        uint8Array2,
+        this.video.videoWidth,
+        this.video.videoHeight
+      )
+
+      // put segmented frame onto tempCanvas3
+      this.tempCtx3.clearRect(0, 0, this.videoWidth, this.videoHeight)
+      this.tempCtx2.putImageData(dataNew2, 0, 0)
+      this.tempCtx3.drawImage(this.tempCanvas2, 0, 0)
+      this.tempCtx3.filter = 'blur(0.1rem)'
+    }
+
+    // draw the bottom layer on canvas
+    {
+      this.canvasCtx.clearRect(0, 0, this.videoWidth, this.videoHeight)
+      if (this.backgroundImage.complete && this.backgroundImage.naturalHeight !== 0) {
+        this.canvasCtx.drawImage(this.backgroundImage, 0, 0, this.video.videoWidth, this.video.videoHeight)
       }
     }
 
-    this.canvasCtx.clearRect(0, 0, this.videoWidth, this.videoHeight)
-
-    // draw background image
-    if (this.backgroundImage.complete && this.backgroundImage.naturalHeight !== 0) {
-      this.canvasCtx.drawImage(this.backgroundImage, 0, 0, this.video.videoWidth, this.video.videoHeight)
-    }
-
-    const uint8Array = new Uint8ClampedArray(imageData.buffer)
-    const dataNew = new ImageData(
-      uint8Array,
-      this.video.videoWidth,
-      this.video.videoHeight
-    )
-
-    // put segmented frame onto canvas
-    this.tempCtx.putImageData(dataNew, 0, 0)
+    // put three layers together
+    this.canvasCtx.drawImage(this.tempCanvas3, 0, 0)
     this.canvasCtx.drawImage(this.tempCanvas, 0, 0)
 
     window.requestAnimationFrame(this.predictWebcam)
@@ -115,6 +168,7 @@ export class VirtualBackgroundStream {
     try {
       // draw video frame on tempCanvas
       this.tempCtx.drawImage(this.video, 0, 0, this.video.videoWidth, this.video.videoHeight)
+      this.tempCtx2.drawImage(this.video, 0, 0, this.video.videoWidth, this.video.videoHeight)
       this.segmenter.segmentForVideo(this.video, performance.now(), this.callbackForVideo)
     } catch (error) {
       console.error('error when processing frame:', error)
