@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import { useAtom } from 'jotai'
 import WaveSurfer from 'wavesurfer.js'
 import RecordPlugin from 'wavesurfer.js/dist/plugins/record'
-import { isWechat } from '../../lib/util'
 import SvgProgress from '../svg/progress'
 import { deviceSpeakerAtom, speakerStatusAtom } from '../../store/atom'
+import {
+  SvgMuted,
+  SvgUnmuted,
+  SvgFullscreen,
+  SvgExitFullscreen,
+  SvgPictureInPicture,
+} from '../svg/player'
 
 function AudioWave(props: { stream: MediaStream }) {
   const refWave = useRef<HTMLDivElement>(null)
@@ -32,13 +38,74 @@ function AudioWave(props: { stream: MediaStream }) {
 }
 
 export default function Player(props: { stream: MediaStream, muted: boolean, audio?: boolean, video?: boolean, width: string }) {
-  const refVideo = useRef<HTMLVideoElement>(null)
+  const refCanvas = useRef<HTMLCanvasElement>(null)
   const [showAudio, setShowAudio] = useState(false)
   const audioTrack = props.stream.getAudioTracks()[0]
   const videoTrack = props.stream.getVideoTracks()[0]
   const [currentDeviceSpeaker] = useAtom(deviceSpeakerAtom)
   const [speakerStatus] = useAtom(speakerStatusAtom)
   const refPlayPromise = useRef<Promise<void> | null>(null)
+  const refControls = useRef<HTMLDivElement>(null)
+  const [showControls, setShowControls] = useState(false)
+  const refTimeoutId = useRef<NodeJS.Timeout | null>(null)
+  const [isMuted, setIsMuted] = useState(false)
+  const [isFullScreened, setIsFullscreened] = useState(false)
+
+  const handleMouseMove = () => {
+    setShowControls(true)
+    if (refTimeoutId.current) clearTimeout(refTimeoutId.current)
+    const newTimeout = setTimeout(() => {
+      setShowControls(false)
+    }, 2000)
+    refTimeoutId.current = newTimeout
+  }
+
+  const toggleMute = () => {
+    if (isMuted) {
+      setIsMuted(false)
+    } else {
+      setIsMuted(true)
+    }
+  }
+  const isFullscreenSupported = () => {
+    const container = refCanvas.current?.parentElement
+    return (
+      typeof document.exitFullscreen === 'function' &&
+    typeof container?.requestFullscreen === 'function'
+    )
+  }
+
+  const toggleFullscreen = () => {
+    const container = refCanvas.current!.parentElement!
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      container.requestFullscreen()
+    }
+  }
+
+  const togglePictureInPicture = () => {
+
+  }
+  useEffect(() => {
+    const onFullScreenChange = () => document.fullscreenElement ? setIsFullscreened(true) : setIsFullscreened(false)
+    if (isFullscreenSupported()) document.addEventListener('fullscreenchange', onFullScreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullScreenChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const container = refControls.current?.parentElement
+    container?.addEventListener('mousemove', handleMouseMove)
+    return () => {
+      container?.removeEventListener('mousemove', handleMouseMove)
+    }
+  }, [])
+
+  useEffect(() => {
+    setIsMuted(!speakerStatus)
+  }, [speakerStatus])
 
   useEffect(() => {
     if (audioTrack && !videoTrack) {
@@ -46,6 +113,7 @@ export default function Player(props: { stream: MediaStream, muted: boolean, aud
     } else {
       setShowAudio(false)
     }
+    if (!props.audio) setIsMuted(true)
     if (audioTrack && props.audio) {
       const el = document.createElement('audio')
       el.srcObject = new MediaStream([audioTrack])
@@ -54,9 +122,8 @@ export default function Player(props: { stream: MediaStream, muted: boolean, aud
         el.setSinkId(currentDeviceSpeaker)
       }
 
-      el.muted = !speakerStatus
+      el.muted = !speakerStatus || isMuted
       refPlayPromise.current = el.play()
-      el.play()
 
       return () => {
         refPlayPromise.current?.finally(() => {
@@ -66,21 +133,39 @@ export default function Player(props: { stream: MediaStream, muted: boolean, aud
         })
       }
     }
-  }, [audioTrack, videoTrack, currentDeviceSpeaker, speakerStatus])
+  }, [audioTrack, videoTrack, currentDeviceSpeaker, speakerStatus, isMuted])
 
   useEffect(() => {
-    if (refVideo.current && videoTrack) {
-      refVideo.current.srcObject = new MediaStream([videoTrack])
-
-      // NOTE: About Autoplay
-      // Reference: https://developer.mozilla.org/en-US/docs/Web/Media/Autoplay_guide
-
-      // NOTE:
-      // iOS Wechat WebView
-      // https://developers.weixin.qq.com/community/develop/doc/0006a61de48ab0165f99e1dcd51c00
-      if (isWechat()) refVideo.current.play()
+    let done = false
+    const video = document.createElement('video')
+    video.muted = props.muted
+    if (refCanvas.current && videoTrack) {
+      video.srcObject = new MediaStream([videoTrack])
+      const rect = refCanvas.current.parentElement!.getBoundingClientRect()
+      refCanvas.current.width = rect.width
+      refCanvas.current.height = rect.height
+      const ctx = refCanvas.current.getContext('2d')
+      function draw() {
+        if (video && ctx && refCanvas.current) {
+          ctx.drawImage(video, 0, 0, refCanvas.current.width, refCanvas.current.height)
+        }
+        if (!done) window.requestAnimationFrame(draw)
+      }
+      video.onloadeddata = () => {
+        if (video) {
+          video.play()
+          draw()
+        }
+      }
     }
-  }, [refVideo, videoTrack])
+    return () => {
+      done = true
+      if (video) {
+        video.onloadeddata = null
+        video.remove()
+      }
+    }
+  }, [videoTrack])
 
   // NOTE: iOS can't display video
   // https://webkit.org/blog/6784/new-video-policies-for-ios/
@@ -93,23 +178,55 @@ export default function Player(props: { stream: MediaStream, muted: boolean, aud
   // - NOTE: video element don't has `audioTrack`, So volume button is unavailable
   // - NOTE: `pointerEvents: 'none'` (I forget why has this in video element. removed)
   return (
-    <center className="flex flex-col justify-center min-h-60" style={{ width: props.width }}>
+    <center
+      className={`relative flex flex-col justify-center min-h-60 ${
+        window.matchMedia('(orientation: portrait)').matches ? 'aspect-[3/4]' : 'aspect-[4/3]'
+      }`}
+      style={{ width: props.width }}
+    >
       {!props.stream.getTracks().length ? <center><SvgProgress /></center> : null}
-      <video
+      <canvas
         className="rounded-xl"
-        playsInline={true}
-        autoPlay={true}
-        controls={true}
-        muted={props.muted}
-        ref={refVideo}
+        ref={refCanvas}
         style={props.stream?.getVideoTracks().length
-          ? { width: props.width, display: props.video ? 'inline' : 'none'}
+          ? { display: props.video ? 'inline' : 'none'}
           : { height: '0px' }}
       />
       {!props.video || showAudio
         ? <AudioWave stream={props.stream} />
         : null
       }
+      <div
+        className={`absolute bottom-0 left-0 right-0 rounded-b-xl px-4 py-3 flex justify-between items-center transition-opacity duration-300 ${
+          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
+        ref={refControls}
+      >
+        <button
+          className="rounded-md disabled:bg-gray-400 disabled:opacity-70"
+          onClick={toggleMute}
+          disabled={!props.audio || !speakerStatus}
+        >
+          {isMuted ? <SvgMuted /> : <SvgUnmuted />}
+        </button>
+        <div
+          className="space-x-2"
+        >
+          <button
+            className="rounded-md disabled:bg-gray-400 disabled:opacity-70"
+            onClick={toggleFullscreen}
+            disabled={!isFullscreenSupported()}
+          >
+            {isFullScreened ? <SvgExitFullscreen /> : <SvgFullscreen />}
+          </button>
+          <button
+            className="rounded-md disabled:bg-gray-400 disabled:opacity-70"
+            onClick={togglePictureInPicture}
+          >
+            <SvgPictureInPicture />
+          </button>
+        </div>
+      </div>
     </center>
   )
 }
